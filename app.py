@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import concurrent.futures
 from typing import Optional, List, Dict
 
 API_URL = "https://gateway.edsn.nl/eancodeboek/v1/ecbinfoset"
@@ -40,7 +41,7 @@ def validate_and_process_csv(df: pd.DataFrame) -> None:
 
 
 def process_rows(df: pd.DataFrame) -> List[Dict[str, Optional[str]]]:
-    """Processes each row in the DataFrame and retrieves metering data.
+    """Processes each row in the DataFrame and retrieves metering data concurrently.
 
     Args:
         df (pd.DataFrame): Dataframe containing validated CSV data.
@@ -49,34 +50,44 @@ def process_rows(df: pd.DataFrame) -> List[Dict[str, Optional[str]]]:
         list: List of processed metering data records.
     """
     metering_data: List[Dict[str, Optional[str]]] = []
+    tasks = []
 
-    for _, row in df.iterrows():
-        street_number_addition: Optional[str] = row.get("streetNumberAddition")
-        street_number_addition = (
-            None
-            if pd.isna(street_number_addition) or street_number_addition == ""
-            else street_number_addition
-        )
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        for _, row in df.iterrows():
+            street_number_addition: Optional[str] = row.get("streetNumberAddition")
+            street_number_addition = (
+                None
+                if pd.isna(street_number_addition) or street_number_addition == ""
+                else street_number_addition
+            )
 
-        for product in ["ELK", "GAS"]:
-            process_product(metering_data, row, product, street_number_addition)
+            for product in ["ELK", "GAS"]:
+                tasks.append(
+                    executor.submit(
+                        process_product, row, product, street_number_addition
+                    )
+                )
+
+        for future in concurrent.futures.as_completed(tasks):
+            result = future.result()
+            if result:
+                metering_data.extend(result)
 
     return metering_data
 
 
 def process_product(
-    metering_data: List[Dict[str, Optional[str]]],
-    row: pd.Series,
-    product: str,
-    street_number_addition: Optional[str],
-) -> None:
-    """Processes a specific product for a given row and appends data.
+    row: pd.Series, product: str, street_number_addition: Optional[str]
+) -> List[Dict[str, Optional[str]]]:
+    """Processes a specific product for a given row and returns data.
 
     Args:
-        metering_data (list): List to append processed metering data.
         row (pd.Series): A row from the DataFrame.
         product (str): Product type ("ELK" or "GAS").
         street_number_addition (str, optional): Street number addition.
+
+    Returns:
+        list: Processed metering data.
     """
     metering_points = get_metering_points(
         product=product,
@@ -86,9 +97,12 @@ def process_product(
     )
 
     if metering_points:
-        metering_data.extend(format_metering_points(row, metering_points))
+        return format_metering_points(row, metering_points)
     else:
-        metering_data.append(row.to_dict())
+        row_dict = row.to_dict()
+        row_dict["product"] = product  # Ensure product is explicitly stated
+        row_dict["ean"] = None  # Explicitly show no EAN available
+        return [row_dict]
 
 
 def format_metering_points(
