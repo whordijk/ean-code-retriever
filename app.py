@@ -36,6 +36,10 @@ def validate_and_process_csv(df: pd.DataFrame) -> None:
 
     if metering_data:
         updated_df = pd.DataFrame(metering_data)
+        updated_df.sort_values(
+            by=["postalCode", "streetNumber", "streetNumberAddition", "product"],
+            inplace=True,
+        )
         st.write("Metering Data:", updated_df)
         download_csv(updated_df)
 
