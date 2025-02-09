@@ -51,6 +51,7 @@ def validate_and_process_csv(df: pd.DataFrame) -> None:
             by=["postalCode", "streetNumber", "streetNumberAddition", "product"],
             inplace=True,
         )
+        updated_df.reset_index(drop=True, inplace=True)
         st.write("Metering Data:", updated_df)
         download_csv(updated_df)
 
