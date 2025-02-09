@@ -10,6 +10,11 @@ API_URL = "https://gateway.edsn.nl/eancodeboek/v1/ecbinfoset"
 def main() -> None:
     """Main function to run the Streamlit app."""
     st.title("EAN Code Retriever")
+    st.write(
+        "Upload a CSV file containing postal codes and street numbers to retrieve EAN metering data."
+    )
+    st.write("The results will be displayed and can be downloaded as a CSV file.")
+
     uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
 
     if uploaded_file:
@@ -32,7 +37,13 @@ def validate_and_process_csv(df: pd.DataFrame) -> None:
     df["postalCode"] = df["postalCode"].astype(str)
     df["streetNumber"] = df["streetNumber"].astype(int)
 
-    metering_data = process_rows(df)
+    metering_data, missing_addresses = process_rows(df)
+
+    if missing_addresses:
+        for postal_code, street_number in missing_addresses:
+            st.warning(
+                f"No ELK or GAS metering points found for postal code {postal_code} and street number {street_number}"
+            )
 
     if metering_data:
         updated_df = pd.DataFrame(metering_data)
@@ -44,7 +55,7 @@ def validate_and_process_csv(df: pd.DataFrame) -> None:
         download_csv(updated_df)
 
 
-def process_rows(df: pd.DataFrame) -> List[Dict[str, Optional[str]]]:
+def process_rows(df: pd.DataFrame) -> (List[Dict[str, Optional[str]]], List[tuple]):
     """Processes each row in the DataFrame and retrieves metering data concurrently.
 
     Args:
@@ -52,9 +63,11 @@ def process_rows(df: pd.DataFrame) -> List[Dict[str, Optional[str]]]:
 
     Returns:
         list: List of processed metering data records.
+        list: List of addresses where no metering points were found.
     """
     metering_data: List[Dict[str, Optional[str]]] = []
-    tasks = []
+    missing_addresses: List[tuple] = []
+    tasks = {}
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         for _, row in df.iterrows():
@@ -65,19 +78,29 @@ def process_rows(df: pd.DataFrame) -> List[Dict[str, Optional[str]]]:
                 else street_number_addition
             )
 
+            address_key = (row["postalCode"], row["streetNumber"])
+            tasks[address_key] = []
+
             for product in ["ELK", "GAS"]:
-                tasks.append(
+                tasks[address_key].append(
                     executor.submit(
                         process_product, row, product, street_number_addition
                     )
                 )
 
-        for future in concurrent.futures.as_completed(tasks):
-            result = future.result()
-            if result:
-                metering_data.extend(result)
+        for key, futures in tasks.items():
+            result_data = []
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result:
+                    result_data.extend(result)
 
-    return metering_data
+            if not result_data:
+                missing_addresses.append(key)
+            else:
+                metering_data.extend(result_data)
+
+    return metering_data, missing_addresses
 
 
 def process_product(
@@ -103,10 +126,7 @@ def process_product(
     if metering_points:
         return format_metering_points(row, metering_points)
     else:
-        row_dict = row.to_dict()
-        row_dict["product"] = product  # Ensure product is explicitly stated
-        row_dict["ean"] = None  # Explicitly show no EAN available
-        return [row_dict]
+        return []
 
 
 def format_metering_points(
