@@ -56,7 +56,9 @@ def validate_and_process_csv(df: pd.DataFrame) -> None:
         download_csv(updated_df)
 
 
-def process_rows(df: pd.DataFrame) -> (List[Dict[str, Optional[str]]], List[tuple]):
+def process_rows(
+    df: pd.DataFrame,
+) -> tuple[List[Dict[str, Optional[str]]], List[tuple]]:
     """Processes each row in the DataFrame and retrieves metering data concurrently.
 
     Args:
@@ -105,8 +107,8 @@ def process_rows(df: pd.DataFrame) -> (List[Dict[str, Optional[str]]], List[tupl
 
 
 def process_product(
-    row: pd.Series, product: str, street_number_addition: Optional[str]
-) -> List[Dict[str, Optional[str]]]:
+    row: pd.Series, product: str, street_number_addition: Optional[dict]
+) -> List[Dict[str, Optional[dict]]]:
     """Processes a specific product for a given row and returns data.
 
     Args:
@@ -131,8 +133,8 @@ def process_product(
 
 
 def format_metering_points(
-    row: pd.Series, metering_points: List[Dict[str, str]]
-) -> List[Dict[str, Optional[str]]]:
+    row: pd.Series, metering_points: List[Dict[str, dict]]
+) -> List[Dict[str, Optional[dict]]]:
     """Formats the retrieved metering points into a structured list.
 
     Args:
@@ -160,8 +162,8 @@ def get_metering_points(
     product: str,
     postal_code: str,
     street_number: int,
-    street_number_addition: Optional[str] = None,
-) -> Optional[List[Dict[str, str]]]:
+    street_number_addition: Optional[dict] = None,
+) -> Optional[List[Dict[str, dict]]]:
     """Fetches metering points from the API based on address information.
 
     Args:

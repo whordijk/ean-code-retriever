@@ -2,6 +2,8 @@
 
 EAN Code Retriever is a user-friendly application for retrieving European Article Numbering (EAN) codes for electricity (ELK) and gas (GAS) connections in the Netherlands. It uses Streamlit for an interactive interface and efficiently processes CSV file inputs to acquire accurate metering point data.
 
+You can access the app publicly via the Streamlit Community Cloud here: https://ean-code-retriever.streamlit.app/.
+
 ## Features
 
 - **Upload CSV file** – Easily upload CSV files containing postal codes and street numbers to retrieve EAN codes.
