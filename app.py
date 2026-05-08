@@ -1,15 +1,23 @@
-import streamlit as st
+import concurrent.futures
+from typing import Any, Dict, List, Optional, Tuple
+
 import pandas as pd
 import requests
-import concurrent.futures
-from typing import Optional, List, Dict
+import streamlit as st
 
 API_URL = "https://gateway.edsn.nl/eancodeboek/v1/ecbinfoset"
+PRODUCTS = ["ELK", "GAS"]
+MAX_WORKERS = 10
+REQUEST_TIMEOUT_SECONDS = 10
+
+MeteringRecord = Dict[str, Any]
+AddressKey = Tuple[str, int, Optional[str]]
 
 
 def main() -> None:
-    """Main function to run the Streamlit app."""
+    """Run the Streamlit app."""
     st.title("EAN Code Retriever")
+
     st.write(
         "Upload a CSV file containing postal codes and street numbers to retrieve EAN metering data."
     )
@@ -18,107 +26,153 @@ def main() -> None:
     uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
 
     if uploaded_file:
-        df = pd.read_csv(uploaded_file)
+        try:
+            df = pd.read_csv(uploaded_file)
+        except Exception as error:
+            st.error(f"Could not read CSV file: {error}")
+            return
+
         validate_and_process_csv(df)
 
 
 def validate_and_process_csv(df: pd.DataFrame) -> None:
-    """Validates the uploaded CSV file and processes it.
-
-    Args:
-        df (pd.DataFrame): Dataframe containing the uploaded CSV data.
-    """
+    """Validate and process the uploaded CSV file."""
     required_columns = {"postalCode", "streetNumber"}
 
     if not required_columns.issubset(df.columns):
-        st.error(f"CSV must contain at least the columns: {required_columns}")
+        st.error(f"CSV must contain at least the columns: {sorted(required_columns)}")
         return
 
-    df["postalCode"] = df["postalCode"].astype(str)
+    df = df.copy()
+
+    df["postalCode"] = (
+        df["postalCode"]
+        .astype(str)
+        .str.upper()
+        .str.replace(" ", "", regex=False)
+        .str.strip()
+    )
+
+    df["streetNumber"] = pd.to_numeric(df["streetNumber"], errors="coerce")
+
+    invalid_rows = df[df["streetNumber"].isna()]
+    if not invalid_rows.empty:
+        st.error("Some streetNumber values are invalid or missing.")
+        st.dataframe(invalid_rows)
+        return
+
     df["streetNumber"] = df["streetNumber"].astype(int)
+
+    if "streetNumberAddition" in df.columns:
+        df["streetNumberAddition"] = (
+            df["streetNumberAddition"].astype("string").str.strip().replace({"": pd.NA})
+        )
+    else:
+        df["streetNumberAddition"] = pd.NA
 
     metering_data, missing_addresses = process_rows(df)
 
     if missing_addresses:
-        for postal_code, street_number in missing_addresses:
+        for postal_code, street_number, street_number_addition in missing_addresses:
+            addition_text = (
+                f" {street_number_addition}" if street_number_addition else ""
+            )
             st.warning(
-                f"No ELK or GAS metering points found for postal code {postal_code} and street number {street_number}"
+                f"No ELK or GAS metering points found for postal code "
+                f"{postal_code} and street number {street_number}{addition_text}"
             )
 
-    if metering_data:
-        updated_df = pd.DataFrame(metering_data)
-        updated_df.sort_values(
-            by=["postalCode", "streetNumber", "streetNumberAddition", "product"],
-            inplace=True,
-        )
-        updated_df.reset_index(drop=True, inplace=True)
-        st.write("Metering Data:", updated_df)
-        download_csv(updated_df)
+    if not metering_data:
+        st.info("No metering data found.")
+        return
+
+    updated_df = pd.DataFrame(metering_data)
+
+    updated_df.sort_values(
+        by=["postalCode", "streetNumber", "streetNumberAddition", "product"],
+        inplace=True,
+    )
+    updated_df.reset_index(drop=True, inplace=True)
+
+    st.subheader("Metering Data")
+    st.dataframe(updated_df, use_container_width=True)
+
+    download_csv(updated_df)
 
 
 def process_rows(
     df: pd.DataFrame,
-) -> tuple[List[Dict[str, Optional[str]]], List[tuple]]:
-    """Processes each row in the DataFrame and retrieves metering data concurrently.
+) -> Tuple[List[MeteringRecord], List[AddressKey]]:
+    """Process each row and retrieve metering data concurrently."""
+    metering_data: List[MeteringRecord] = []
+    missing_addresses: List[AddressKey] = []
 
-    Args:
-        df (pd.DataFrame): Dataframe containing validated CSV data.
+    tasks = []
 
-    Returns:
-        list: List of processed metering data records.
-        list: List of addresses where no metering points were found.
-    """
-    metering_data: List[Dict[str, Optional[str]]] = []
-    missing_addresses: List[tuple] = []
-    tasks = {}
+    progress_bar = st.progress(0)
+    total_addresses = len(df)
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         for _, row in df.iterrows():
-            street_number_addition: Optional[str] = row.get("streetNumberAddition")
-            street_number_addition = (
-                None
-                if pd.isna(street_number_addition) or street_number_addition == ""
-                else street_number_addition
+            street_number_addition = normalize_optional_value(
+                row.get("streetNumberAddition")
             )
 
-            address_key = (row["postalCode"], row["streetNumber"])
-            tasks[address_key] = []
+            address_key: AddressKey = (
+                row["postalCode"],
+                row["streetNumber"],
+                street_number_addition,
+            )
 
-            for product in ["ELK", "GAS"]:
-                tasks[address_key].append(
-                    executor.submit(
-                        process_product, row, product, street_number_addition
-                    )
+            futures = [
+                executor.submit(
+                    process_product,
+                    row,
+                    product,
+                    street_number_addition,
                 )
+                for product in PRODUCTS
+            ]
 
-        for key, futures in tasks.items():
-            result_data = []
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
+            tasks.append(
+                {
+                    "address": address_key,
+                    "futures": futures,
+                }
+            )
+
+        completed_addresses = 0
+
+        for task in tasks:
+            result_data: List[MeteringRecord] = []
+
+            for future in concurrent.futures.as_completed(task["futures"]):
+                try:
+                    result = future.result()
+                except Exception as error:
+                    st.warning(f"Could not process one request: {error}")
+                    result = []
+
                 if result:
                     result_data.extend(result)
 
-            if not result_data:
-                missing_addresses.append(key)
-            else:
+            if result_data:
                 metering_data.extend(result_data)
+            else:
+                missing_addresses.append(task["address"])
+
+            completed_addresses += 1
+            progress_bar.progress(completed_addresses / total_addresses)
 
     return metering_data, missing_addresses
 
 
 def process_product(
-    row: pd.Series, product: str, street_number_addition: Optional[str]
-) -> List[Dict[str, Optional[dict]]]:
-    """Processes a specific product for a given row and returns data.
-
-    Args:
-        row (pd.Series): A row from the DataFrame.
-        product (str): Product type ("ELK" or "GAS").
-        street_number_addition (str, optional): Street number addition.
-
-    Returns:
-        list: Processed metering data.
-    """
+    row: pd.Series,
+    product: str,
+    street_number_addition: Optional[str],
+) -> List[MeteringRecord]:
+    """Process one product type for a given address."""
     metering_points = get_metering_points(
         product=product,
         postal_code=row["postalCode"],
@@ -126,33 +180,28 @@ def process_product(
         street_number_addition=street_number_addition,
     )
 
-    if metering_points:
-        return format_metering_points(row, metering_points)
-    else:
+    if not metering_points:
         return []
+
+    return format_metering_points(row, metering_points)
 
 
 def format_metering_points(
-    row: pd.Series, metering_points: List[Dict[str, dict]]
-) -> List[Dict[str, Optional[dict]]]:
-    """Formats the retrieved metering points into a structured list.
-
-    Args:
-        row (pd.Series): A row from the DataFrame.
-        metering_points (list): List of metering point data.
-
-    Returns:
-        list: Formatted list of metering point dictionaries.
-    """
+    row: pd.Series,
+    metering_points: List[Dict[str, Any]],
+) -> List[MeteringRecord]:
+    """Format retrieved metering points into structured records."""
     return [
         {
             "postalCode": row["postalCode"],
             "streetNumber": row["streetNumber"],
-            "streetNumberAddition": meter_point["address"].get("streetNumberAddition"),
+            "streetNumberAddition": meter_point.get("address", {}).get(
+                "streetNumberAddition"
+            ),
             "bagId": meter_point.get("bagId"),
-            "product": meter_point["product"],
-            "ean": meter_point["ean"],
-            "specialMeteringPoint": meter_point["specialMeteringPoint"],
+            "product": meter_point.get("product"),
+            "ean": meter_point.get("ean"),
+            "specialMeteringPoint": meter_point.get("specialMeteringPoint"),
         }
         for meter_point in metering_points
     ]
@@ -163,43 +212,62 @@ def get_metering_points(
     postal_code: str,
     street_number: int,
     street_number_addition: Optional[str] = None,
-) -> Optional[List[Dict[str, dict]]]:
-    """Fetches metering points from the API based on address information.
-
-    Args:
-        product (str): Product type ("ELK" or "GAS").
-        postal_code (str): Postal code of the address.
-        street_number (int): Street number of the address.
-        street_number_addition (str, optional): Street number addition.
-
-    Returns:
-        list or None: List of metering points if found, otherwise None.
-    """
-    params = {
+) -> Optional[List[Dict[str, Any]]]:
+    """Fetch metering points from the API."""
+    params: Dict[str, Any] = {
         "product": product,
-        "postalCode": str(postal_code),
-        "streetNumber": int(street_number),
+        "postalCode": postal_code,
+        "streetNumber": street_number,
     }
-    if street_number_addition:
-        params["streetNumberAddition"] = str(street_number_addition)
 
-    response = requests.get(API_URL, params=params)
-    return (
-        response.json().get("meteringPoints", [])
-        if response.status_code == 200
-        else None
-    )
+    if street_number_addition:
+        params["streetNumberAddition"] = street_number_addition
+
+    try:
+        response = requests.get(
+            API_URL,
+            params=params,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.json().get("meteringPoints", [])
+
+    except requests.RequestException as error:
+        st.warning(
+            f"API request failed for {postal_code} {street_number} ({product}): {error}"
+        )
+        return None
+
+    except ValueError as error:
+        st.warning(
+            f"Could not parse API response for {postal_code} {street_number} "
+            f"({product}): {error}"
+        )
+        return None
+
+
+def normalize_optional_value(value: Any) -> Optional[str]:
+    """Normalize optional CSV values such as street number additions."""
+    if pd.isna(value):
+        return None
+
+    value = str(value).strip()
+
+    if value == "":
+        return None
+
+    return value
 
 
 def download_csv(updated_df: pd.DataFrame) -> None:
-    """Creates a downloadable CSV file from the processed metering data.
-
-    Args:
-        updated_df (pd.DataFrame): DataFrame containing the processed data.
-    """
+    """Create a downloadable CSV file from the processed data."""
     csv = updated_df.to_csv(index=False)
+
     st.download_button(
-        "Download CSV", data=csv, file_name="metering_data.csv", mime="text/csv"
+        "Download CSV",
+        data=csv,
+        file_name="metering_data.csv",
+        mime="text/csv",
     )
 
 
