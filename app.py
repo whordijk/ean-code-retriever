@@ -107,7 +107,7 @@ def process_rows(
 
 
 def process_product(
-    row: pd.Series, product: str, street_number_addition: Optional[dict]
+    row: pd.Series, product: str, street_number_addition: Optional[str]
 ) -> List[Dict[str, Optional[dict]]]:
     """Processes a specific product for a given row and returns data.
 
@@ -162,7 +162,7 @@ def get_metering_points(
     product: str,
     postal_code: str,
     street_number: int,
-    street_number_addition: Optional[dict] = None,
+    street_number_addition: Optional[str] = None,
 ) -> Optional[List[Dict[str, dict]]]:
     """Fetches metering points from the API based on address information.
 
