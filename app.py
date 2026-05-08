@@ -64,8 +64,10 @@ def validate_and_process_csv(df: pd.DataFrame) -> None:
     df["streetNumber"] = df["streetNumber"].astype(int)
 
     if "streetNumberAddition" in df.columns:
-        df["streetNumberAddition"] = (
-            df["streetNumberAddition"].astype("string").str.strip().replace({"": pd.NA})
+        street_number_addition = df["streetNumberAddition"].astype("string").str.strip()
+        df["streetNumberAddition"] = street_number_addition.mask(
+            street_number_addition == "",
+            pd.NA,
         )
     else:
         df["streetNumberAddition"] = pd.NA
